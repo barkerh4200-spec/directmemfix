@@ -1,0 +1,23 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "dev.gtpatch.mixin",
+  "compatibilityLevel": "JAVA_17",
+  "refmap": "gtpatch.refmap.json",
+  "client": [
+    "WorldSceneRendererMixin",
+    "MultiblockInWorldPreviewRendererMixin",
+    "PatternPreviewWidgetMixin",
+    "RenderSectionManagerMixin",
+    "SinkingVertexBuilderMixin",
+    "VBORenderTypeLeakMixin",
+    "SceneWidgetFBOLeakMixin",
+    "ClientImageCacheMixin"
+  ],
+  "mixins": [
+    "SkyblockBuilderMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

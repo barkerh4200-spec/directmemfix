@@ -1,0 +1,108 @@
+// -----------------------------------------------------------------------------
+//  gtpatch -- GT Memory Fix  v4.0.0
+//  Targets: GTCEu 7.5.2  +  LDLib 1.0.49  on Forge 1.20.1-47.4.3
+// -----------------------------------------------------------------------------
+plugins {
+    id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+    id 'org.spongepowered.mixin'   version '0.7.+'
+}
+
+version              = '5.2.0'
+group                = 'dev.gtpatch'
+archivesBaseName     = 'gtpatch'
+
+java {
+    toolchain.languageVersion = JavaLanguageVersion.of(17)
+}
+
+// Force UTF-8 source encoding -- prevents garbled chars on Windows (cp1252)
+// Mixin AP 0.8.5 does not honour @Dynamic for @Inject target resolution,
+// so it emits "Cannot find target method" warnings for synthetic lambda
+// methods (lambda$renderCacheBuffer$2, lambda$prepareBuffers$0) even though
+// those methods are confirmed to exist at runtime via javap.  The injections
+// are correct; the warnings are false positives from the AP being unable to
+// see synthetic members in compileOnly jars.  Suppress them cleanly here.
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.warnings = false
+}
+
+// -- Minecraft / Forge --------------------------------------------------------
+minecraft {
+    mappings channel: 'official', version: '1.20.1'
+
+    // No access transformers needed for this patch
+    // accessTransformer = file('src/main/resources/META-INF/accesstransformer.cfg')
+
+    runs {
+        client {
+            workingDirectory project.file('run')
+            property 'forge.logging.markers',       'REGISTRIES'
+            property 'forge.logging.console.level', 'debug'
+            property 'mixin.env.remapRefMap',        'true'
+            property 'mixin.env.refMapRemappingFile', "${projectDir}/build/createSrgToMcp/output.srg"
+            mods {
+                gtpatch { source sourceSets.main }
+            }
+        }
+    }
+}
+
+// -- Mixin --------------------------------------------------------------------
+mixin {
+    add sourceSets.main, 'gtpatch.refmap.json'
+    config 'gtpatch.mixins.json'
+    debug.export = true
+}
+
+// -- Repositories -------------------------------------------------------------
+repositories {
+    // *** DROP YOUR JARS IN libs/ -- see README for the full list ***
+    flatDir {
+        dirs 'libs'
+    }
+
+    maven { url = 'https://maven.minecraftforge.net' }
+    maven { url = 'https://repo.spongepowered.org/repository/maven-public' }
+
+    // GTCEu / LDLib are in libs/ via flatDir, but in case you want Maven:
+    // maven { url = 'https://maven.blamejared.com' }
+}
+
+// -- Dependencies -------------------------------------------------------------
+dependencies {
+    minecraft 'net.minecraftforge:forge:1.20.1-47.4.3'
+
+    // Mixin annotation processor -- provided by ForgeGradle at runtime,
+    // but we need it on the AP classpath during compilation.
+    annotationProcessor 'org.spongepowered:mixin:0.8.5:processor'
+
+    // -- Mod JARs from libs/ (compileOnly -- they are on the game classpath at runtime)
+    // All Mixins use remap=false targeting mod-defined classes only, so fg.deobf()
+    // is not needed. Plain files() works and avoids the File->Dependency type error.
+    compileOnly files('libs/ldlib-forge-1.20.1-1.0.49.jar')
+    compileOnly files('libs/gtceu-1.20.1-7.5.2.jar')
+    compileOnly files('libs/SkyblockBuilder-1.20.1-5.1.28.jar')
+    compileOnly files('libs/embeddium-0.3.31+mc1.20.1.jar')
+    compileOnly files('libs/CodeChickenLib-1.20.1-4.4.0.516-universal.jar')
+}
+
+// -- JAR manifest -------------------------------------------------------------
+jar {
+    manifest {
+        attributes([
+            'Specification-Title'   : 'gtpatch',
+            'Specification-Vendor'  : 'gtpatch',
+            'Specification-Version' : '1',
+            'Implementation-Title'  : project.name,
+            'Implementation-Version': project.version,
+            'Implementation-Vendor' : 'gtpatch',
+            'MixinConfigs'          : 'gtpatch.mixins.json',
+        ])
+    }
+    finalizedBy 'reobfJar'
+}
+
+reobf {
+    jar {}
+}

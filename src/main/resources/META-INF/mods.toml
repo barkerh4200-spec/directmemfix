@@ -1,0 +1,59 @@
+modLoader    = "javafml"
+loaderVersion = "[47,)"
+license       = "MIT"
+
+[[mods]]
+modId        = "gtpatch"
+version      = "5.2.0"
+displayName  = "GT Memory Fix"
+description  = '''
+Hotfix for DirectByteBuffer / VRAM leaks in GregTech CEu Modern 7.5.2 + LDLib 1.0.49.
+
+Bug 1 — WorldSceneRenderer (LDLib)
+  lambda$renderCacheBuffer$2 uploads geometry into a VertexBuffer then returns
+  without calling RenderedBuffer.close(). The native DirectByteBuffer backing
+  every compiled render layer is never freed. Fires on every machine state
+  change / recipe tick for every machine in render range.
+
+Bug 2 — MultiblockInWorldPreviewRenderer (GTCEu)
+  lambda$prepareBuffers$0 has the identical RenderedBuffer leak in the
+  in-world hologram preview compile path.
+
+Bug 3 — MultiblockInWorldPreviewRenderer.cleanPreview() (GTCEu)
+  Sets LEVEL = null without first calling TrackedDummyWorld.clear(), leaving
+  the full blockEntities / renderedBlocks map graph reachable. Also never
+  closes the BUFFERS VertexBuffer[] array, leaking GL objects each time a new
+  preview position replaces the old one.
+
+Bug 4 — PatternPreviewWidget (GTCEu)
+  Static LEVEL TrackedDummyWorld is never cleared when the GUI closes or when
+  a new pattern page is loaded, keeping hundreds of block-entity objects live.
+'''
+
+[[dependencies.gtpatch]]
+modId        = "forge"
+mandatory    = true
+versionRange = "[47,)"
+ordering     = "NONE"
+side         = "BOTH"
+
+[[dependencies.gtpatch]]
+modId        = "minecraft"
+mandatory    = true
+versionRange = "[1.20.1,1.21)"
+ordering     = "NONE"
+side         = "BOTH"
+
+[[dependencies.gtpatch]]
+modId        = "ldlib"
+mandatory    = true
+versionRange = "[1.0.49,)"
+ordering     = "AFTER"
+side         = "BOTH"
+
+[[dependencies.gtpatch]]
+modId        = "gtceu"
+mandatory    = true
+versionRange = "[7.5.2,)"
+ordering     = "AFTER"
+side         = "BOTH"
