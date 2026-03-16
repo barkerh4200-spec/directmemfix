@@ -1,126 +1,232 @@
 package dev.gtpatch.mixin;
 
 import com.gregtechceu.gtceu.api.gui.widget.PatternPreviewWidget;
+import com.gregtechceu.gtceu.api.machine.feature.multiblock.IMultiController;
+import com.gregtechceu.gtceu.api.machine.multiblock.MultiblockControllerMachine;
+import com.lowdragmc.lowdraglib.utils.BlockInfo;
 import com.lowdragmc.lowdraglib.utils.TrackedDummyWorld;
+import net.minecraft.core.BlockPos;
+import net.minecraft.world.level.block.entity.BlockEntity;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
+import java.lang.reflect.Field;
+import java.util.Map;
+
 /**
- * FIX — Bug 4: Static {@code PatternPreviewWidget.LEVEL} never cleared between pattern loads
+ * FIX -- Bug 4 (revised v5.3.1): GTCEu JEI multiblock preview goes blank after
+ * clicking the layer up/down button, and stays blank for all subsequent previews.
  *
- * <h3>Root cause</h3>
- * {@code PatternPreviewWidget} holds a single static {@link TrackedDummyWorld} called
- * {@code LEVEL} that is shared across every instance of the widget (every multiblock
- * machine definition in the JEI/REI/EMI multiblock preview). It is populated by
- * {@code SceneWidget.setRenderedCore()} when a new pattern is displayed, but
- * {@code clear()} is never called first. Every block from every previously viewed
- * pattern variant accumulates in the world's internal maps across the session.
+ * <h2>Root cause (bytecode-confirmed, gtceu-1.20.1-7.5.2.jar + ldlib-1.0.49.jar)</h2>
  *
- * <p>A bloated {@code LEVEL} amplifies Bugs 1 and 2: more blocks in the world means
- * more vertices per VBO compile pass, meaning more {@link com.mojang.blaze3d.vertex.BufferBuilder.RenderedBuffer}
- * allocations per machine update cycle. Even though each buffer is individually freed
- * by the Bug 1/2 fixes, the peak allocation per compile pass keeps rising — which is
- * why direct memory kept growing even after the v4.0.0 patch.
+ * The v5.2.0 fix incorrectly called {@code LEVEL.clear()} inside a {@code setPage}
+ * injection. This broke the preview because:
  *
- * <h3>Call-graph analysis</h3>
- * {@code setupScene(MBPattern)} is called from TWO sites (confirmed via javap):
- *
- * <pre>
- *   setPage(I)V       — user presses left/right arrow to change pattern variant
- *   updateLayer()V    — called when the layer slider changes; may fire frequently
- * </pre>
- *
- * {@code updateScreen()V} calls {@code setPage(0)} exactly ONCE per widget lifetime:
- * it is guarded by the {@code isLoaded} boolean which is set to {@code true}
- * immediately after, so subsequent ticks skip the call entirely.
- *
- * The bytecode of {@code setPage} shows that {@code this.index} is written at
- * bytecode offset 16 (AFTER our HEAD inject runs), so at the HEAD inject point
- * {@code this.index} still holds the PREVIOUS index value. This lets us compare
- * {@code page != this.index} to detect a genuine page change.
- *
- * <h3>Fix</h3>
- * Inject ONLY on {@code setPage(I)V} with the guard {@code page != this.index}.
- * The guard has two effects:
  * <ol>
- *   <li>Prevents clearing on the once-per-open {@code updateScreen → setPage(0)} call
- *       (which passes the same index that's already stored).</li>
- *   <li>Prevents any future caller from triggering a spurious clear.</li>
+ *   <li>{@code initializePattern()} is cached in a static {@code CACHE} map and runs
+ *       exactly once per definition per JVM session. It is the ONLY place that calls
+ *       {@code LEVEL.addBlocks(pattern.blockMap)}, populating
+ *       {@code TrackedDummyWorld.renderedBlocks}.</li>
+ *   <li>{@code setupScene(MBPattern)} -- called by both {@code setPage} and
+ *       {@code updateLayer} -- only calls {@code sceneWidget.setRenderedCore(...)}.
+ *       It does NOT re-populate LEVEL. Layer filtering is handled by the SceneWidget
+ *       wrapper's {@code renderFilter} predicate ({@code pos -> core.contains(pos)}),
+ *       not by LEVEL content.</li>
+ *   <li>Once {@code LEVEL.clear()} wiped {@code renderedBlocks}, every
+ *       {@code getBlockState(pos)} returned AIR (LEVEL is a no-arg
+ *       {@code TrackedDummyWorld} -- {@code proxyWorld} is null -- so it reads
+ *       solely from {@code renderedBlocks}). The VBO cache compiled to zero vertices.
+ *       The preview stayed blank for the rest of the session because
+ *       {@code initializePattern} never re-ran (CACHE hit).</li>
  * </ol>
  *
- * <p>We deliberately do NOT inject on {@code setupScene} — that would run on every
- * {@code updateLayer()} call which fires on layer-slider interaction, clearing the
- * world that is actively being rendered and breaking preview display.
- *
- * <h3>Bytecode evidence</h3>
- * Field confirmed static via javap on {@code gtceu-1.20.1-7.5.2.jar}:
+ * <h2>Key bytecode evidence</h2>
  * <pre>
- *   private static TrackedDummyWorld LEVEL;          // acc_flags = 0x000a (private static)
- *   private int index;                               // acc_flags = 0x0002 (private instance)
+ *   // updateLayer() offset 92 -- layer button handler:
+ *   invokevirtual setupScene:(Lcom/.../MBPattern;)V
+ *   // setPage(I) offset 33 -- page navigation:
+ *   invokevirtual setupScene:(Lcom/.../MBPattern;)V
  *
- *   void setPage(int page):
- *     offset  0: iload_1                             // page
- *     ...bounds checks...
- *     offset 16: putfield PatternPreviewWidget.index:I  // this.index = page  ← AFTER HEAD
- *     offset 33: invokevirtual setupScene(MBPattern)V
+ *   // setupScene -- does NOT touch LEVEL, only updates sceneWidget.core Set:
+ *   sceneWidget.setRenderedCore(filtered.toList(), null);
+ *
+ *   // TrackedDummyWorld.getBlockState(pos) (m_8055_):
+ *   Level proxy = proxyWorld.get();   // null for no-arg ctor
+ *   if (proxy == null) return renderedBlocks.getOrDefault(pos, EMPTY).getBlockState();
+ *   // => empty renderedBlocks => every pos returns AIR => blank VBO compile
+ *
+ *   // TrackedDummyWorld.addBlock(pos, info):
+ *   renderedBlocks.put(pos, info);    // offset 14
+ *   blockEntities.remove(pos);        // offset 26 -- DESTROYS block entity at pos!
+ *   // => after addBlocks(blockMap), must restore controller BE via setInnerBlockEntity
+ *
+ *   // MBPattern fields -- public final in bytecode (flags 0x0011),
+ *   //   but inaccessible to javac from outside package (inner class visibility).
+ *   //   Accessed via reflection with setAccessible(true).
+ *   Map&lt;BlockPos, BlockInfo&gt; blockMap;       // initializePattern populates LEVEL from this
+ *   IMultiController          controllerBase; // null if no controller in this variant
  * </pre>
+ *
+ * <h2>Fix</h2>
+ *
+ * <p>Inject at HEAD of {@code setupScene(MBPattern)} -- the single call site for
+ * both layer changes and page changes. Ensure LEVEL always has blocks before the
+ * VBO compiler reads from it.
+ *
+ * <p><b>Guard:</b> {@code LEVEL.renderedBlocks.isEmpty()} -- the fast path (normal
+ * layer click on a fresh widget) returns immediately with zero overhead.
+ *
+ * <p><b>Recovery:</b> when LEVEL is empty, call {@code LEVEL.addBlocks(blockMap)}
+ * and {@code LEVEL.setInnerBlockEntity(controllerBE)} -- replicating exactly what
+ * {@code initializePattern} does at offsets 192-222.
+ *
+ * <p><b>Reflection:</b> {@code MBPattern.blockMap} and {@code MBPattern.controllerBase}
+ * are {@code public final} at the bytecode level but inaccessible to {@code javac}
+ * when crossing package boundaries for inner classes. We use {@code setAccessible(true)}
+ * to bypass this at runtime.
+ *
+ * <p>The v5.2.0 {@code setPage} inject that called {@code LEVEL.clear()} has been
+ * REMOVED. It was the sole cause of the blank-screen bug.
  */
 @Mixin(value = PatternPreviewWidget.class, remap = false)
 public abstract class PatternPreviewWidgetMixin {
 
+    private static final Logger LOGGER = LogManager.getLogger("GTpatch/PPWFix");
+
     /**
-     * The static TrackedDummyWorld shared across all pattern preview instances.
-     * Field descriptor and static modifier confirmed via javap on gtceu-1.20.1-7.5.2.jar:
-     *   private static com.lowdragmc.lowdraglib.utils.TrackedDummyWorld LEVEL;
-     *   access_flags = 0x000a (private | static)
+     * Reflected handle for {@code MBPattern.blockMap}.
+     * Field is {@code public final Map<BlockPos, BlockInfo>} at the bytecode level
+     * (flags 0x0011), but inaccessible to javac from outside the package due to
+     * inner-class visibility rules. Initialised once on first inject call.
+     */
+    private static volatile Field f_blockMap = null;
+
+    /**
+     * Reflected handle for {@code MBPattern.controllerBase}.
+     * Field is {@code public final IMultiController} at the bytecode level
+     * (flags 0x0011). Same cross-package inner-class restriction as blockMap.
+     */
+    private static volatile Field f_controllerBase = null;
+
+    /**
+     * Shared static TrackedDummyWorld.
+     * Confirmed: {@code private static TrackedDummyWorld LEVEL;} (flags 0x000a).
      */
     @Shadow(remap = false)
     private static TrackedDummyWorld LEVEL;
 
-    /**
-     * The current page index. At the time our HEAD inject fires, this still holds
-     * the PREVIOUS page (the field is written by the original method body at
-     * bytecode offset 16, after our inject).
-     * Confirmed instance field, access_flags = 0x0002 (private).
-     */
-    @Shadow(remap = false)
-    private int index;
+    // -------------------------------------------------------------------------
+    // Reflection helpers
+    // -------------------------------------------------------------------------
 
     /**
-     * Clear the shared TrackedDummyWorld before a genuine page change.
+     * Lazily initialise and cache the two {@code MBPattern} field handles.
+     * Returns {@code true} if both handles are ready, {@code false} on any failure.
+     */
+    private static boolean initReflection(Object pattern) {
+        if (f_blockMap != null && f_controllerBase != null) {
+            return true;
+        }
+        try {
+            Class<?> mbPatternClass = pattern.getClass();
+            Field bm = mbPatternClass.getDeclaredField("blockMap");
+            bm.setAccessible(true);
+            Field cb = mbPatternClass.getDeclaredField("controllerBase");
+            cb.setAccessible(true);
+            f_blockMap = bm;
+            f_controllerBase = cb;
+            return true;
+        } catch (Exception e) {
+            LOGGER.warn("[GTpatch] Could not reflect MBPattern fields: {}", e.getMessage());
+            return false;
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Injection
+    // -------------------------------------------------------------------------
+
+    /**
+     * Ensure LEVEL has blocks before the VBO compiler reads from it.
      *
-     * <p>The guard {@code page != this.index} ensures we only act when the displayed
-     * pattern is actually changing. This avoids:
-     * <ul>
-     *   <li>The once-per-open {@code updateScreen() → setPage(this.index)} call that
-     *       JEI/EMI/REI fires to sync the recipe view.</li>
-     *   <li>Any other same-index re-entrancy.</li>
-     * </ul>
+     * <p>Covers both call sites of {@code setupScene}:
+     * <pre>
+     *   setPage(I)V    -- offset 33: invokevirtual setupScene(patterns[page])
+     *   updateLayer()V -- offset 92: invokevirtual setupScene(patterns[index])
+     * </pre>
      *
-     * <p>We do NOT inject on {@code setupScene} — that method is also called by
-     * {@code updateLayer()} on layer-slider changes, which must not clear the world
-     * while it is actively being rendered.
+     * <p>Fast path: {@code LEVEL.renderedBlocks} non-empty -- return immediately.
+     * Recovery path: repopulate from {@code pattern.blockMap} via reflection and
+     * restore the controller block entity.
      */
     @Inject(
-        method = "setPage(I)V",
+        method = "setupScene(Lcom/gregtechceu/gtceu/api/gui/widget/PatternPreviewWidget$MBPattern;)V",
         at = @At("HEAD"),
         remap = false
     )
-    private void gtpatch_clearLevelOnPageChange(int page, CallbackInfo ci) {
-        // Only clear when the page actually changes. At HEAD, this.index still
-        // holds the old value because the field write happens later in the body.
-        if (page == this.index) {
+    private void gtpatch_ensureLevelPopulated(
+            PatternPreviewWidget.MBPattern pattern,
+            CallbackInfo ci) {
+
+        if (LEVEL == null || pattern == null) {
             return;
         }
-        if (LEVEL != null) {
-            try {
-                LEVEL.clear();
-            } catch (Exception ignored) {
-                // Never let cleanup abort the original setPage call.
+
+        // Fast path: LEVEL already has blocks -- layer filtering is done by the
+        // SceneWidget core set, not by LEVEL content. Nothing to do.
+        if (!LEVEL.renderedBlocks.isEmpty()) {
+            return;
+        }
+
+        // Recovery path: LEVEL was cleared. Repopulate.
+        if (!initReflection(pattern)) {
+            return; // reflection setup failed, logged above -- don't abort setupScene
+        }
+
+        try {
+            @SuppressWarnings("unchecked")
+            Map<BlockPos, BlockInfo> blockMap =
+                (Map<BlockPos, BlockInfo>) f_blockMap.get(pattern);
+
+            if (blockMap == null || blockMap.isEmpty()) {
+                return;
             }
+
+            // Replicates initializePattern offset 192-196:
+            //   LEVEL.addBlocks(blockMap);
+            LEVEL.addBlocks(blockMap);
+
+            // TrackedDummyWorld.addBlock() calls blockEntities.remove(pos) for every
+            // position (offset 26 in addBlock bytecode), which just destroyed any
+            // controller BE that was registered in LEVEL.blockEntities.
+            // Restore it -- replicates initializePattern offsets 204-222.
+            IMultiController controller =
+                (IMultiController) f_controllerBase.get(pattern);
+
+            if (controller != null) {
+                try {
+                    MultiblockControllerMachine machine = controller.self();
+                    BlockEntity controllerBE = machine.holder.getSelf();
+                    LEVEL.setInnerBlockEntity(controllerBE);
+                } catch (Exception e) {
+                    // Best-effort. Pattern still renders; formed-state BE is absent.
+                    LOGGER.debug("[GTpatch] Controller BE restoration failed: {}",
+                            e.getMessage());
+                }
+            }
+
+            LOGGER.debug("[GTpatch] Restored {} blocks into LEVEL (was empty at setupScene)",
+                    blockMap.size());
+
+        } catch (Exception e) {
+            // Never abort the original setupScene call.
+            LOGGER.debug("[GTpatch] gtpatch_ensureLevelPopulated failed: {}",
+                    e.getMessage());
         }
     }
 }
