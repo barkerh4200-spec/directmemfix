@@ -1,9 +1,11 @@
 package dev.gtpatch.mixin;
 
 import codechicken.lib.render.buffer.VBORenderType;
+import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.vertex.BufferBuilder;
 import dev.gtpatch.VBORenderTypeRegistry;
 import io.netty.util.internal.PlatformDependent;
+import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.injection.At;
@@ -15,76 +17,96 @@ import java.nio.ByteBuffer;
 
 /**
  * FIX — Bug 7 (CodeChickenLib 4.4.0.516): {@code VBORenderType} instances
- * are never closed when a multiblock preview session is torn down, causing a
- * permanent accumulation of OpenGL VBO + VAO name leaks AND direct ByteBuffer
- * accumulation.
+ * created by GTCEu's multiblock preview scene renderer are never closed,
+ * causing unbounded OpenGL VBO + VAO accumulation and direct ByteBuffer growth.
  *
- * <h3>Field finality (bytecode-confirmed)</h3>
- * All three resource-holding fields of {@code VBORenderType} are
- * {@code private final} (access_flags = 0x0012):
- * <pre>
- *   [0x0012] factory:      Ljava/util/function/BiConsumer;
- *   [0x0012] vertexBuffer: Lcom/mojang/blaze3d/vertex/VertexBuffer;
- *   [0x0012] builder:      Lcom/mojang/blaze3d/vertex/BufferBuilder;
- * </pre>
- * {@code @Shadow} on a {@code final} field is legal for <em>reading</em>.
- * Writing to it from outside {@code <init>} raises
- * {@code java.lang.IllegalAccessError: Update to non-static final field ...
- * attempted from a different method than the initializer method <init>}.
- * We therefore never assign to the shadow field.
+ * <h3>Scope — render-thread guard (v4.3.3+)</h3>
  *
- * <h3>Two-part leak</h3>
- * <b>Part A — GL VBO + VAO:</b> freed by {@code vertexBuffer.close()} in the
- * original {@code VBORenderType.close()} body, which our inject leaves intact.
+ * <p>This mixin applies to <em>all</em> {@code VBORenderType} instances, but
+ * only the ones created <em>off</em> the render thread are tracked and managed
+ * by {@link VBORenderTypeRegistry}. The guard fires in both the registration
+ * path ({@link #gtpatch_registerVBO}) and the close path
+ * ({@link #gtpatch_freeBuilderBufferOnClose}).
  *
- * <b>Part B — Direct ByteBuffer in {@code builder}:</b>
- * {@code BufferBuilder(int)} calls {@code ByteBuffer.allocateDirect(initialCapacity)}.
- * {@code VBORenderType.close()} never touches {@code builder}; the ByteBuffer
- * waits for GC + Cleaner. Under GC pressure (~4 MB per preview session accumulates
- * because GTCEu uses 6+ render types per preview rebuild).
+ * <h4>Why the guard is required</h4>
+ * <p>Every Draconic Evolution tool renderer ({@code RenderModularPickaxe},
+ * {@code RenderModularAxe}, {@code RenderModularSword}, etc.) creates a
+ * {@code VBORenderType} wrapping a {@code RenderType} named
+ * {@code "draconicevolution:base"} — the same name across all tool types.
+ * Without the guard, the reactive tier in {@link VBORenderTypeRegistry#register}
+ * would close an earlier tool's VBORenderType the moment a later tool renders for
+ * the first time. The closed instance is still held by a {@code LazyValue} that
+ * never recreates it, causing a NPE in {@code rebuild()} on the next render.
  *
- * <h3>Fix</h3>
- * In {@code close()} HEAD inject, read {@code this.builder} via the shadow field
- * and free its backing {@code ByteBuffer} immediately via
- * {@link PlatformDependent#freeDirectBuffer(ByteBuffer)}.
+ * <p>The close-path guard mirrors the register guard: if {@code close()} is ever
+ * called on a render-thread VBORenderType (for example, during a resource reload
+ * when model renderers are rebuilt), we must not call
+ * {@link PlatformDependent#freeDirectBuffer} on the backing {@code ByteBuffer}.
+ * Freeing a buffer that is still in use by Embeddium's modified
+ * {@code BufferBuilder} internals corrupts the builder's internal state —
+ * causing blank/transparent item icons and {@code "Error Rendering"} in JEI.
  *
- * The ByteBuffer is obtained via two attempts in priority order:
- * <ol>
- *   <li>Cast {@code builder} to Embeddium's
- *       {@code ExtendedBufferBuilder} interface and call
- *       {@code sodium$getBuffer()} — returns the {@code f_85648_} field
- *       (confirmed via Embeddium's {@code BufferBuilderMixin} bytecode).</li>
- *   <li>Fall back to reflection on the SRG name {@code f_85648_} directly
- *       on the {@code BufferBuilder} instance.</li>
- * </ol>
- * We deliberately do <em>NOT</em> null {@code this.builder} after freeing:
- * {@code builder} is {@code final} and writing to it outside {@code <init>}
- * raises {@code IllegalAccessError} at the JVM level.
+ * <h4>Thread ownership of GTCEu vs item renderer VBORenderTypes</h4>
+ * <ul>
+ *   <li><b>GTCEu WorldSceneRenderer</b> — compiles VBOs on a plain background
+ *       {@link Thread} ({@code new Thread(lambda).start()} in
+ *       {@code lambda$renderCacheBuffer$5}). Not the render thread.
+ *       These ARE tracked and freed by our registry.</li>
+ *   <li><b>DE / BrandonsCore item renderers</b> — called from
+ *       {@code GuiGraphics.renderItem()} on the render thread.
+ *       These are NOT tracked, and their buffers are NOT freed by us.</li>
+ * </ul>
+ *
+ * <h3>@Shadow @Final — correct Mixin practice for final fields</h3>
+ * <p>The {@code builder} field is {@code private final} in the target class
+ * (confirmed access_flags 0x0012). In Mixin, shadowing a {@code final} field
+ * requires the {@code @Final} annotation rather than the Java {@code final}
+ * keyword in the shadow declaration. Using {@code @Shadow private final field = null}
+ * without {@code @Final} causes the Java compiler to emit a
+ * {@code putfield field, null} in the mixin's {@code <init>}, which Mixin must
+ * strip. {@code @Final} explicitly signals to Mixin that the field is final in
+ * the target, preventing any initializer handling issues and suppressing the
+ * "non-final shadow" warning.
  */
 @Mixin(value = VBORenderType.class, remap = false)
 public abstract class VBORenderTypeLeakMixin {
 
     /**
      * Read-only shadow of the {@code private final BufferBuilder builder} field.
-     * Used only for reading — we never assign to this shadow.
-     * Confirmed private final (access_flags = 0x0012) via javap.
+     *
+     * <p>{@code @Final} is required (not {@code final} keyword) when shadowing
+     * a final field in Mixin. Without it the Java compiler emits a
+     * {@code putfield builder = null} in the mixin constructor that Mixin must
+     * strip; omitting {@code @Final} risks that initializer being applied to
+     * the target class instance, nulling the field after construction.
+     *
+     * <p>Confirmed private final (access_flags = 0x0012) via javap on
+     * {@code CodeChickenLib-1.20.1-4.4.0.516-universal.jar}.
      */
-    @Shadow(remap = false)
-    private final BufferBuilder builder = null;
+    @Shadow @Final
+    private BufferBuilder builder;
 
     /**
      * Cached reflection Field for {@code BufferBuilder.f_85648_} (the backing
-     * {@code ByteBuffer}). Initialised lazily on first use and reused thereafter
-     * to avoid repeated reflection lookups. {@code volatile} for visibility across
-     * the compile thread and the render thread.
+     * {@code ByteBuffer}). Initialised lazily on first use and reused thereafter.
+     * {@code volatile} for safe publication across the background compile thread
+     * and the render thread.
      */
     private static volatile Field gtpatch_bbBufferField = null;
+
+    // -------------------------------------------------------------------------
+    // Registration — background-thread VBORenderTypes only
+    // -------------------------------------------------------------------------
 
     /**
      * Register this instance in the global leak tracker at the end of construction.
      *
-     * <p>At {@code @At("RETURN")} of {@code <init>}, all fields (including
-     * {@code vertexBuffer}, {@code builder}) have been assigned. Safe to register.
+     * <p><b>Render-thread guard:</b> skip registration if the current thread IS
+     * the render thread. All item renderers (DE tools, BrandonsCore contributor
+     * wings, DE chestpiece armor parts) create VBORenderTypes on the render thread.
+     * Registering them would cause the reactive tier to close them when another
+     * tool with the same render-type name is rendered, leaving a closed instance
+     * in the {@code LazyValue} — crashing or silently corrupting subsequent renders.
      */
     @Inject(
         method = "<init>(Lnet/minecraft/client/renderer/RenderType;Ljava/util/function/BiConsumer;)V",
@@ -92,19 +114,34 @@ public abstract class VBORenderTypeLeakMixin {
         remap = false
     )
     private void gtpatch_registerVBO(CallbackInfo ci) {
+        if (RenderSystem.isOnRenderThread()) {
+            return;
+        }
         VBORenderTypeRegistry.register((VBORenderType) (Object) this);
     }
 
+    // -------------------------------------------------------------------------
+    // Cleanup — mirrors the same render-thread scope as registration
+    // -------------------------------------------------------------------------
+
     /**
-     * Unregister from the tracker AND eagerly free the {@code BufferBuilder}'s
+     * Unregister from the tracker and eagerly free the {@code BufferBuilder}'s
      * backing direct {@code ByteBuffer} when this instance is closed.
      *
-     * <p>{@code @At("HEAD")} fires before the original body's
-     * {@code getfield vertexBuffer; invokevirtual VertexBuffer.close()} at
-     * bytecode offsets 1–4. Order between buffer free and GL resource free
-     * does not matter — they are independent resources.
+     * <p><b>Render-thread guard on freeDirectBuffer:</b> if the current thread
+     * IS the render thread, we skip the buffer free entirely. This covers the
+     * case where {@code close()} is called on a render-thread VBORenderType —
+     * for example during a resource reload when model renderers are rebuilt.
+     * Calling {@code PlatformDependent.freeDirectBuffer} on a buffer that
+     * Embeddium's modified {@code BufferBuilder} still tracks internally causes
+     * corrupted builder state on subsequent renders, manifesting as blank item
+     * textures and {@code "Error Rendering"} errors in JEI.
      *
-     * <p>We do NOT write to {@code this.builder} — it is {@code final}.
+     * <p>The {@code unregister()} call is intentionally placed before the thread
+     * check: render-thread VBORenderTypes are never registered (see
+     * {@link #gtpatch_registerVBO}), so {@code unregister()} is a no-op
+     * conditional-remove for them regardless. Placing it first keeps the flow
+     * clean and ensures the registry is always consistent.
      */
     @Inject(
         method = "close()V",
@@ -112,28 +149,31 @@ public abstract class VBORenderTypeLeakMixin {
         remap = false
     )
     private void gtpatch_freeBuilderBufferOnClose(CallbackInfo ci) {
-        // (a) Remove from live registry before GL cleanup.
+        // Always unregister first (no-op for render-thread VBOs that were never registered).
         VBORenderTypeRegistry.unregister((VBORenderType) (Object) this);
 
-        // (b) Eagerly free the BufferBuilder's backing ByteBuffer.
-        //     builder is private final — we can READ it via @Shadow but cannot
-        //     write to it. We only need to read it here to extract the ByteBuffer.
+        // Skip buffer free for render-thread VBORenderTypes.
+        // If close() is called on a DE/BrandonsCore VBO (e.g., resource reload),
+        // freeing its ByteBuffer would corrupt Embeddium's BufferBuilder internal
+        // state and cause blank textures / "Error Rendering" in JEI.
+        if (RenderSystem.isOnRenderThread()) {
+            return;
+        }
+
+        // Eagerly free the BufferBuilder's backing ByteBuffer for background-thread
+        // VBORenderTypes (GTCEu scene VBOs). These were created on a background thread
+        // and are closed by our registry — safe to free their buffers immediately.
         if (this.builder == null) return;
 
         try {
             ByteBuffer buf = null;
 
             // Attempt 1: Embeddium's ExtendedBufferBuilder interface.
-            // sodium$getBuffer() returns the f_85648_ field directly.
-            // Confirmed via Embeddium BufferBuilderMixin bytecode:
-            //   sodium$getBuffer()Ljava/nio/ByteBuffer;: getfield f_85648_
             if (this.builder instanceof me.jellysquid.mods.sodium.client.render.vertex.buffer.ExtendedBufferBuilder ext) {
                 buf = ext.sodium$getBuffer();
             }
 
-            // Attempt 2: Reflection on the SRG field name f_85648_.
-            // f_85648_ is the SRG-mapped name for BufferBuilder.buffer in 1.20.1,
-            // confirmed via Embeddium's BufferBuilderMixin which shadows it.
+            // Attempt 2: Reflection on SRG field name f_85648_.
             if (buf == null) {
                 Field f = gtpatch_bbBufferField;
                 if (f == null) {
@@ -141,26 +181,18 @@ public abstract class VBORenderTypeLeakMixin {
                         f = BufferBuilder.class.getDeclaredField("f_85648_");
                         f.setAccessible(true);
                         gtpatch_bbBufferField = f;
-                    } catch (NoSuchFieldException ignored) {
-                        // Field name may differ in non-SRG environments; skip.
-                    }
+                    } catch (NoSuchFieldException ignored) {}
                 }
                 if (f != null) {
                     Object val = f.get(this.builder);
-                    if (val instanceof ByteBuffer bb) {
-                        buf = bb;
-                    }
+                    if (val instanceof ByteBuffer bb) buf = bb;
                 }
             }
 
-            // Free if direct. PlatformDependent.freeDirectBuffer invokes the
-            // sun.misc.Cleaner immediately, reclaiming native memory without
-            // waiting for a GC cycle.
             if (buf != null && buf.isDirect()) {
                 PlatformDependent.freeDirectBuffer(buf);
             }
         } catch (Exception ignored) {
-            // If either path fails, the GC Cleaner handles it eventually.
             // Never abort the original close() call.
         }
     }
