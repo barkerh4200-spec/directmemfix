@@ -2,15 +2,26 @@ package dev.gtpatch.mixin;
 
 import com.lowdragmc.lowdraglib.client.scene.WorldSceneRenderer;
 import com.mojang.blaze3d.vertex.BufferBuilder;
+import com.mojang.blaze3d.vertex.PoseStack;
+import com.mojang.blaze3d.vertex.VertexConsumer;
 import com.mojang.blaze3d.vertex.VertexFormat;
 import com.mojang.blaze3d.vertex.VertexSorting;
 import io.netty.util.internal.PlatformDependent;
+import net.minecraft.client.renderer.RenderType;
+import net.minecraft.client.renderer.block.BlockRenderDispatcher;
+import net.minecraft.core.BlockPos;
+import net.minecraft.util.RandomSource;
+import net.minecraft.world.level.BlockAndTintGetter;
+import net.minecraft.world.level.block.state.BlockState;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Redirect;
 
 import java.lang.reflect.Field;
 import java.nio.ByteBuffer;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * FIX — Bug 9 (LDLib): {@code WorldSceneRenderer.lambda$renderCacheBuffer$5}
@@ -84,6 +95,9 @@ import java.nio.ByteBuffer;
 @Mixin(value = WorldSceneRenderer.class, remap = false)
 public abstract class WorldSceneRendererMixin {
 
+    private static final Logger LOGGER = LogManager.getLogger("GTpatch/CTMFix");
+    private static final AtomicBoolean CTM_LOGGED = new AtomicBoolean(false);
+
     /**
      * Intercept the {@code new BufferBuilder(bufferSize)} constructor call inside
      * {@code lambda$renderCacheBuffer$5} (bytecode offset 66–75) and return an
@@ -105,6 +119,80 @@ public abstract class WorldSceneRendererMixin {
     )
     private BufferBuilder gtpatch_wrapCompileBufferBuilder(int bufferSize) {
         return new AutoDiscardingBufferBuilder(bufferSize);
+    }
+
+    // -------------------------------------------------------------------------
+    // Fix — Bug 11 (LDLib+CTM): CTM's AbstractCTMBakedModel.getQuads throws
+    // ArrayIndexOutOfBoundsException in LDLib's fake world (no chunk neighbours),
+    // which Minecraft wraps as ReportedException and rethrows from tesselateBlock.
+    // The exception escapes renderBlocksForge, killing the background compile
+    // thread before cacheState reaches COMPILED and before poseStack.pop() fires.
+    //
+    // Redirect the invokestatic renderBlocksForge call at renderBlocks offset 203
+    // to wrap it in try/catch. On success: unchanged. On failure: log once and
+    // return — poseStack.pop() (offset 227) and progress++ (offset 338) both
+    // execute, the thread continues, and the preview eventually renders.
+    // -------------------------------------------------------------------------
+
+    /**
+     * FIX — Bug 11 (LDLib+CTM): wraps the {@code renderBlocksForge} static call
+     * inside {@code renderBlocks} (bytecode offset 203) in a {@code try/catch} so
+     * that CTM's {@code ArrayIndexOutOfBoundsException} (wrapped as
+     * {@code ReportedException}) cannot kill the background compile thread.
+     *
+     * <p>Root cause (bytecode-confirmed, ldlib-forge-1.20.1-1.0.49.jar):
+     * <pre>
+     *   renderBlocks offset 156: PoseStack.m_85836_()         ← push
+     *   renderBlocks offset 203: invokestatic renderBlocksForge ← CTM throws here
+     *   renderBlocks offset 227: PoseStack.m_85849_()         ← pop (skipped without fix)
+     *   renderBlocks offset 338: putfield progress             ← skipped → stuck at 0.5%
+     * </pre>
+     */
+    @Redirect(
+        method = "renderBlocks(Lcom/mojang/blaze3d/vertex/PoseStack;"
+               + "Lnet/minecraft/client/renderer/block/BlockRenderDispatcher;"
+               + "Lnet/minecraft/client/renderer/RenderType;"
+               + "Lcom/lowdragmc/lowdraglib/client/scene/WorldSceneRenderer$VertexConsumerWrapper;"
+               + "Ljava/util/Collection;"
+               + "Lcom/lowdragmc/lowdraglib/client/scene/ISceneBlockRenderHook;F"
+               + "Lnet/minecraft/util/RandomSource;)V",
+        at = @At(
+            value = "INVOKE",
+            target = "Lcom/lowdragmc/lowdraglib/client/scene/WorldSceneRenderer;"
+                   + "renderBlocksForge("
+                   + "Lnet/minecraft/client/renderer/block/BlockRenderDispatcher;"
+                   + "Lnet/minecraft/world/level/block/state/BlockState;"
+                   + "Lnet/minecraft/core/BlockPos;"
+                   + "Lnet/minecraft/world/level/BlockAndTintGetter;"
+                   + "Lcom/mojang/blaze3d/vertex/PoseStack;"
+                   + "Lcom/mojang/blaze3d/vertex/VertexConsumer;"
+                   + "Lnet/minecraft/util/RandomSource;"
+                   + "Lnet/minecraft/client/renderer/RenderType;)V"
+        ),
+        remap = false
+    )
+    private void gtpatch_safeRenderBlocksForge(
+            BlockRenderDispatcher blockRenderDispatcher,
+            BlockState state,
+            BlockPos pos,
+            BlockAndTintGetter level,
+            PoseStack poseStack,
+            VertexConsumer consumer,
+            RandomSource random,
+            RenderType renderType) {
+        try {
+            WorldSceneRenderer.renderBlocksForge(
+                    blockRenderDispatcher, state, pos, level,
+                    poseStack, consumer, random, renderType);
+        } catch (Exception e) {
+            if (CTM_LOGGED.compareAndSet(false, true)) {
+                LOGGER.warn("[GTpatch] CTM block tesselation failed (block={}, pos={}); "
+                        + "skipping block in multiblock preview. Exception: {}",
+                        state != null ? state.getBlock().getDescriptionId() : "null",
+                        pos, e.getMessage());
+                LOGGER.debug("[GTpatch] CTM tesselation full trace:", e);
+            }
+        }
     }
 
     // -------------------------------------------------------------------------
