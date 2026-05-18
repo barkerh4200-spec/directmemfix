@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(.\\\\gradlew build *)",
+      "Bash(awk '/^fki /{found=1} found && /^\\\\t/{print} found && /^[^\\\\t]/ && !/^fki /{found=0}' \"/c/Users/henry/Desktop/minecraft_mods_source/modpack_libs_src/mappings/forge/1.20.1-20230612.114412/1.20.1-20230612.114412/joined/mergeMappings/config/joined.tsrg\")",
+      "Bash(awk '/^fki /{found=1; next} found && /^\\\\t/{print; next} found && /^[^\\\\t]/{exit}' \"/c/Users/henry/Desktop/minecraft_mods_source/modpack_libs_src/mappings/forge/1.20.1-20230612.114412/1.20.1-20230612.114412/joined/mergeMappings/config/joined.tsrg\")",
+      "Bash(grep -n \"GTpatch\" \"C:/Users/henry/Downloads/latest.log\" | head -60)",
+      "Bash(grep -n \"FOG_START\\\\|FOG_END\\\\|setShaderFog\\\\|getShaderFog\\\\|shaderFog\\\\|FogStart\\\\|FogEnd\\\\|fog\" \"/mnt/host/c/Users/henry/Desktop/minecraft_mods_source/modpack_libs_src/GregTech-Modern-7.5.2-1.20.1/src/main/java/com/gregtechceu/gtceu/client/renderer/MultiblockInWorldPreviewRenderer.java\" 2>/dev/null | head -80)",
+      "Bash(find \"/mnt/host/c/Users/henry/Desktop/minecraft_mods_source/modpack_libs_src\" -name \"MultiblockInWorldPreviewRenderer.java\" 2>/dev/null | head -5)",
+      "Bash(ls -t \"C:/Users/henry/AppData/Roaming/PolyMC/instances/Deepspace v1.0.3/.minecraft/logs/\" 2>/dev/null | head -5)",
+      "Bash(./gradlew build *)",
+      "Bash(copy \"C:\\\\Users\\\\henry\\\\Desktop\\\\minecraft_mods_source\\\\ldlib_directmemfix_7.5.2\\\\build\\\\libs\\\\gtpatch-4.3.5.jar\" \"C:\\\\Users\\\\henry\\\\AppData\\\\Roaming\\\\PolyMC\\\\instances\\\\Deepspace v1.0.3\\\\.minecraft\\\\mods\\\\gtpatch-4.3.5.jar\")",
+      "PowerShell($result = & \"C:\\\\Program Files\\\\7-Zip\\\\7z.exe\" u \"C:\\\\Users\\\\henry\\\\Desktop\\\\minecraft_mods_source\\\\ldlib_directmemfix_7.5.2\\\\ldlib_directmemfix_7.5.2.zip\" \"C:\\\\Users\\\\henry\\\\Desktop\\\\minecraft_mods_source\\\\ldlib_directmemfix_7.5.2\\\\src\\\\main\\\\java\\\\dev\\\\gtpatch\\\\mixin\\\\MultiblockInWorldPreviewRendererMixin.java\" -mx=9; Write-Output \\($result | Select-Object -Last 5\\))",
+      "PowerShell($zipPath = \"C:\\\\Users\\\\henry\\\\Desktop\\\\minecraft_mods_source\\\\ldlib_directmemfix_7.5.2\\\\ldlib_directmemfix_7.5.2.zip\")",
+      "Bash(jar tf *)",
+      "Bash(find /mnt/host/c/Users/henry/.gradle/caches -name \"*.jar\" 2>/dev/null | grep -i \"client-1.20\" | head -5)"
+    ]
+  }
+}

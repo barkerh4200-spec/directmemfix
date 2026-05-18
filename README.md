@@ -1,4 +1,4 @@
-# gtpatch — GT Memory Fix v4.3.4
+# gtpatch — GT Memory Fix v7.5.2r3 v4.3.4
 
 Fixes **seven** confirmed bugs in GregTech CEu Modern 7.5.2 + LDLib 1.0.49 +
 Embeddium 0.3.31 + CodeChickenLib 4.4.0.516 on Forge 1.20.1.
@@ -184,6 +184,7 @@ not yet ready.
 ## Changelog
 
 | Version | Changes |
+| 7.5.2r3 | Added Bug 13 fix: redirect renderFilter to p->true in in-world preview — CTM can now access neighbor blocks for texture lookup (fixes sky-colored blocks) |
 |---------|---------|
 | 4.3.4 | Mirrored render-thread guard onto `close()` `freeDirectBuffer` path — fixes blank DE tool textures and "Error Rendering" in JEI on resource reload; fixed `@Shadow @Final` declaration |
 | 4.3.3 | Added render-thread guard to `gtpatch_registerVBO` — fixes crash when viewing Draconic Evolution tool recipes in JEI |

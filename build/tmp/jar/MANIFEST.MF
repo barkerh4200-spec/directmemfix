@@ -1,7 +1,7 @@
 Manifest-Version: 1.0
 Implementation-Title: gtpatch
 MixinConfigs: gtpatch.mixins.json
-Implementation-Version: 4.3.4
+Implementation-Version: 4.3.5
 Specification-Vendor: gtpatch
 Specification-Title: gtpatch
 Specification-Version: 1

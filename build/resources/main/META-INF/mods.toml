@@ -4,7 +4,7 @@ license       = "MIT"
 
 [[mods]]
 modId        = "gtpatch"
-version      = "5.2.0"
+version      = "7.5.2r8"
 displayName  = "GT Memory Fix"
 description  = '''
 Hotfix for DirectByteBuffer / VRAM leaks in GregTech CEu Modern 7.5.2 + LDLib 1.0.49.

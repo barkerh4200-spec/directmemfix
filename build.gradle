@@ -7,7 +7,7 @@ plugins {
     id 'org.spongepowered.mixin'   version '0.7.+'
 }
 
-version              = '4.3.4'
+version              = '4.3.5'
 group                = 'dev.gtpatch'
 archivesBaseName     = 'gtpatch'
 
